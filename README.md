@@ -19,18 +19,23 @@ Arduino-based temperature controller for Eberspacher D1LC heater with display an
 | **Rotary Encoder** | Pin 3 | CLK (Clock) |
 | **Rotary Encoder** | Pin 4 | DT (Data) |
 | **Rotary Encoder** | Pin 5 | SW (Switch/Button) |
+| **Heater Control** | Pin 6 | Yellow wire to D1LC ECU |
 | **OLED Display** | I2C | SDA/SCL (A4/A5 on Uno) |
 | **DS3502 Potentiometer** | I2C | SDA/SCL (A4/A5 on Uno) |
 | **DS3231 RTC Module** | I2C | SDA/SCL (A4/A5 on Uno) |
 
 ## Features
 
-- Real-time temperature monitoring
+- Real-time cabin temperature monitoring
 - Target temperature adjustment via rotary encoder
-- Temperature delta calculation and display
-- Digital potentiometer control for heater output
+- Automatic D1LC heater power control based on temperature difference:
+  - **High Power**: ≥3°C below target (wiper ~28, ~2.2kΩ)
+  - **Medium Power**: 1-3°C below target (wiper ~25, ~2.1kΩ)  
+  - **Low Power**: 0-1°C below target (wiper ~22, ~2.0kΩ)
+  - **Off**: At or above target temperature
+- Digital rheostat control via DS3502 (brown/white ↔ green/red wires)
 - Real-time clock with date/time display
-- OLED display with status icons (Bluetooth, WiFi, Temperature)
+- OLED display with status icons and heater status
 - Automatic time setting on first boot or after power loss
 
 ## Dependencies
@@ -59,7 +64,8 @@ This project is configured for CLion with CMake. The CMakeLists.txt file include
 - **Display Updates**: Every 200ms or on button press
 - **Temperature Control**: Use rotary encoder to adjust target temperature
 - **Button**: Press to immediately update display
-- **Potentiometer**: Automatically cycles through values (1-127) for testing
+- **Heater Control**: Automatic based on cabin vs target temperature
+- **Power Levels**: DS3502 wiper values 20-28 provide ~1.8-2.2kΩ resistance
 
 ## Display Layout
 
@@ -75,3 +81,10 @@ This project is configured for CLion with CMake. The CMakeLists.txt file include
 - **SSD1309 OLED Display**: 0x3C (default)
 - **DS3502 Digital Potentiometer**: 0x28 (default)
 - **DS3231 Real-Time Clock**: 0x68 (fixed)
+
+## D1LC Heater Wiring
+
+- **DS3502 RW ↔ RL**: Connected across brown/white ↔ green/red wires
+- **Yellow Wire**: Connected to Pin 6 for heater enable/disable
+- **ECU expects**: ~1.8–2.2kΩ resistance for power level control
+- **Valid wiper range**: 20-30 (corresponding to required resistance values)
