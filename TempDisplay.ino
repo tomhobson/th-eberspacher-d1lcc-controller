@@ -40,11 +40,26 @@ const unsigned long MIN_ON_MS   = 10UL * 60UL * 1000UL; // ≥10 min on
 const unsigned long MIN_OFF_MS  =  5UL * 60UL * 1000UL; // ≥5  min off
 const unsigned long WIPER_STEP_DELAY_MS = 120UL;        // smooth ramp
 
+// ========================================
+// HARDWARE OBJECTS
+// ========================================
+OneWire oneWire(TEMP_SENSOR_PIN);
+DallasTemperature sensors(&oneWire);
+Adafruit_DS3502 ds3502 = Adafruit_DS3502();
+U8G2_SSD1309_128X64_NONAME0_F_HW_I2C u8g2(U8G2_R0);
+ezButton button(ENCODER_SW_PIN);
+RTC_DS3231 rtc;
+
 // ===== State for control + smoothing
 enum HeatState { HS_OFF, HS_LOW, HS_MED, HS_HIGH };
 static HeatState hs = HS_OFF;
 static uint8_t   wiper_now = WIPER_LOW_SAFE;
 static unsigned long lastOnMs = 0, lastOffMs = 0, lastWiperStepMs = 0;
+
+// Initialize timing to allow immediate startup
+void initHeaterTiming() {
+  lastOffMs = millis() - MIN_OFF_MS - 1000;  // Allow immediate turn on
+}
 
 // Helpers
 inline uint8_t clampWiper(uint8_t v){
@@ -70,50 +85,70 @@ void setWiperSmooth(uint8_t target){
   Serial.print("Wiper → "); Serial.println(wiper_now);
 }
 
-// D1LC Heater Control Constants
-const int WIPER_OFF = 20;          // ~1.8kΩ - minimum power
-const int WIPER_LOW = 22;          // ~2.0kΩ - low power  
-const int WIPER_MEDIUM = 25;       // ~2.1kΩ - medium power
-const int WIPER_HIGH = 28;         // ~2.2kΩ - high power
-const int TEMP_THRESHOLD_HIGH = 3;  // degrees below target for high power
-const int TEMP_THRESHOLD_MED = 1;   // degrees below target for medium power
-
-// ========================================
-// HARDWARE OBJECTS
-// ========================================
-OneWire oneWire(TEMP_SENSOR_PIN);
-DallasTemperature sensors(&oneWire);
-Adafruit_DS3502 ds3502 = Adafruit_DS3502();
-U8G2_SSD1309_128X64_NONAME0_F_HW_I2C u8g2(U8G2_R0);
-ezButton button(ENCODER_SW_PIN);
-RTC_DS3231 rtc;
-
 // ========================================
 // PROGRAM VARIABLES
 // ========================================
 volatile int target_temperature = 0;
 volatile unsigned long last_time = 0;
 int prev_temperature = 0;
-int current_wiper_value = WIPER_OFF;
+int current_wiper_value = WIPER_LOW_SAFE;
 bool heater_enabled = false;
 unsigned long lastDisplayUpdate = 0;
 
+// Time display variables
+static bool rtc_working = true;
+static bool rtc_initialized = false;
+static uint16_t last_good_year = 2024;
+static uint8_t last_good_month = 1;
+static uint8_t last_good_day = 1;
+static uint8_t last_good_hour = 12;
+static uint8_t last_good_minute = 0;
+static unsigned long last_rtc_read = 0;
+
 // ========================================
-// DISPLAY ICONS (PROGMEM)
+// DISPLAY ICONS (PROGMEM) - 16x16 pixels - XBM FORMAT
 // ========================================
-static const unsigned char PROGMEM image_bluetooth_bits[] = {
-  0x01,0x00,0x02,0x80,0x02,0x40,0x22,0x20,0x12,0x20,0x0a,0x40,0x06,0x80,0x03,0x00,
-  0x06,0x80,0x0a,0x40,0x12,0x20,0x22,0x20,0x02,0x40,0x02,0x80,0x01,0x00,0x00,0x00
+
+// Simple thermometer - PROPER design
+static const unsigned char PROGMEM icon_temp[] = {
+  0x00, 0x00, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01,
+  0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0xC0, 0x03, 0xE0, 0x07,
+  0xE0, 0x07, 0xE0, 0x07, 0xC0, 0x03, 0x00, 0x00
 };
 
-static const unsigned char PROGMEM image_network_3_bars_bits[] = {
-  0x00,0x0e,0x00,0x0a,0x00,0x0a,0x00,0x0a,0x00,0xea,0x00,0xea,0x00,0xea,0x00,0xea,
-  0x0e,0xea,0x0e,0xea,0x0e,0xea,0x0e,0xea,0xee,0xea,0xee,0xea,0xee,0xee,0x00,0x00
+// Clock icon for time display
+static const unsigned char PROGMEM icon_clock[] = {
+  0x00, 0x00, 0xF0, 0x0F, 0x08, 0x10, 0x04, 0x20, 0x04, 0x20, 0x04, 0x20,
+  0x04, 0x20, 0x84, 0x21, 0x44, 0x22, 0x24, 0x24, 0x04, 0x20, 0x04, 0x20,
+  0x04, 0x20, 0x08, 0x10, 0xF0, 0x0F, 0x00, 0x00
 };
 
-static const unsigned char PROGMEM image_weather_temperature_bits[] = {
-  0x1c,0x00,0x22,0x02,0x2b,0x05,0x2a,0x02,0x2b,0x38,0x2a,0x60,0x2b,0x40,0x2a,0x40,
-  0x2a,0x60,0x49,0x38,0x9c,0x80,0xae,0x80,0xbe,0x80,0x9c,0x80,0x41,0x00,0x3e,0x00
+// Heater OFF - simple circle with X
+static const unsigned char PROGMEM icon_heater_off[] = {
+  0x00, 0x00, 0xF0, 0x0F, 0x08, 0x10, 0x04, 0x20, 0x82, 0x41, 0x41, 0x82,
+  0x21, 0x84, 0x11, 0x88, 0x11, 0x88, 0x21, 0x84, 0x41, 0x82, 0x82, 0x41,
+  0x04, 0x20, 0x08, 0x10, 0xF0, 0x0F, 0x00, 0x00
+};
+
+// Heater LOW - small flame
+static const unsigned char PROGMEM icon_heater_low[] = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x01,
+  0x80, 0x01, 0xC0, 0x03, 0xC0, 0x03, 0xE0, 0x07, 0xE0, 0x07, 0xC0, 0x03,
+  0xC0, 0x03, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00
+};
+
+// Heater MED - medium flame
+static const unsigned char PROGMEM icon_heater_med[] = {
+  0x00, 0x00, 0x00, 0x00, 0x80, 0x01, 0x80, 0x01, 0xC0, 0x03, 0xC0, 0x03,
+  0xE0, 0x07, 0xE0, 0x07, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xE0, 0x07,
+  0xE0, 0x07, 0xC0, 0x03, 0x80, 0x01, 0x00, 0x00
+};
+
+// Heater HIGH - large flame
+static const unsigned char PROGMEM icon_heater_high[] = {
+  0x80, 0x01, 0x80, 0x01, 0xC0, 0x03, 0xC0, 0x03, 0xE0, 0x07, 0xE0, 0x07,
+  0xF0, 0x0F, 0xF0, 0x0F, 0xF8, 0x1F, 0xF8, 0x1F, 0xF8, 0x1F, 0xF8, 0x1F,
+  0xF0, 0x0F, 0xF0, 0x0F, 0xE0, 0x07, 0xC0, 0x03
 };
 
 void setup(void) {
@@ -127,34 +162,120 @@ void setup(void) {
   button.setDebounceTime(DEBOUNCE_TIME);
 
   if (!ds3502.begin()) {
-    Serial.println("Couldn't find DS3502 chip");
-    while (1);
+    Serial.println("WARNING: Couldn't find DS3502 chip - continuing anyway");
+    delay(1000);  // Give time to read message
+  } else {
+    Serial.println("Found DS3502 chip");
   }
-  Serial.println("Found DS3502 chip");
 
   // Initialize RTC
   if (!rtc.begin()) {
-    Serial.println("Couldn't find RTC");
-    Serial.flush();
-    while (1) delay(10);
+    Serial.println("WARNING: Couldn't find RTC - using fallback time");
+    rtc_working = false;
+    delay(1000);  // Give time to read message
+  } else {
+    rtc_initialized = true;
   }
 
-  if (rtc.lostPower()) {
+  if (rtc_initialized && rtc.lostPower()) {
     Serial.println("RTC lost power, setting the time!");
     // When time needs to be set on a new device, or after a power loss, the
     // following line sets the RTC to the date & time this sketch was compiled
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
+  
+  // Initialize heater timing to allow immediate operation
+  initHeaterTiming();
+  
+  // Wait a moment for hardware to stabilize
+  delay(100);
+  Serial.println("Setup complete - starting main loop");
 
   // use interrupt for CLK pin is enough
   // call ISR_encoderChange() when CLK pin changes from LOW to HIGH
   attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), ISR_encoderChange, RISING);
 }
 
+// Validate RTC time data
+bool isValidTime(DateTime dt) {
+  // Check if year is reasonable (between 2020 and 2099)
+  if (dt.year() < 2020 || dt.year() > 2099) return false;
+  
+  // Check month (1-12)
+  if (dt.month() < 1 || dt.month() > 12) return false;
+  
+  // Check day (1-31)
+  if (dt.day() < 1 || dt.day() > 31) return false;
+  
+  // Check hour (0-23)
+  if (dt.hour() > 23) return false;
+  
+  // Check minute (0-59)
+  if (dt.minute() > 59) return false;
+  
+  return true;
+}
+
+// Check if time change is reasonable (not jumping wildly)
+bool isReasonableTimeChange(DateTime newTime) {
+  // If we don't have a reference, accept first valid time
+  if (last_rtc_read == 0) return true;
+  
+  // Calculate expected time progression
+  unsigned long elapsed_ms = millis() - last_rtc_read;
+  unsigned long expected_minute_change = elapsed_ms / 60000; // minutes
+  
+  // Create expected time based on last good time + elapsed
+  DateTime expected(last_good_year, last_good_month, last_good_day, 
+                    last_good_hour, last_good_minute, 0);
+  expected = expected + TimeSpan(0, 0, expected_minute_change, 0);
+  
+  // Check if new time is within reasonable range (±5 minutes)
+  long time_diff = abs((long)newTime.unixtime() - (long)expected.unixtime());
+  return (time_diff < 300); // 5 minutes in seconds
+}
+
+// Get stable time with validation and persistence
+DateTime getStableTime() {
+  DateTime now;
+  
+  if (rtc_initialized) {
+    now = rtc.now();
+    
+    if (isValidTime(now) && isReasonableTimeChange(now)) {
+      // Time is valid and reasonable - store it
+      last_good_year = now.year();
+      last_good_month = now.month();  
+      last_good_day = now.day();
+      last_good_hour = now.hour();
+      last_good_minute = now.minute();
+      last_rtc_read = millis();
+      rtc_working = true;
+      return now;
+    } else {
+      // Time is invalid or jumping - use stored time
+      rtc_working = false;
+    }
+  }
+  
+  // Use last known good time (fallback)
+  return DateTime(last_good_year, last_good_month, last_good_day, 
+                  last_good_hour, last_good_minute, 0);
+}
+
 void controlHeater(float cabin_temp, int target_temp) {
   const float diff = target_temp - cabin_temp;   // >0 means too cold
   const unsigned long now = millis();
   HeatState desired = hs;
+  
+  Serial.print("[CONTROL] Current state: ");
+  Serial.print(hs);
+  Serial.print(" Diff: ");
+  Serial.print(diff);
+  Serial.print(" HYS_ON: ");
+  Serial.print(HYS_ON);
+  Serial.print(" canTurnOn: ");
+  Serial.println(canTurnOn());
 
   if (hs == HS_OFF) {
     // Stay OFF unless we’re sufficiently below target and allowed to start
@@ -181,6 +302,7 @@ void controlHeater(float cabin_temp, int target_temp) {
     switch (hs) {
       case HS_OFF:
         digitalWrite(HEATER_CONTROL_PIN, LOW);     // disable yellow ON line
+        heater_enabled = false;  // Update display variable
         lastOffMs = now;
         Serial.println("Heater: OFF");
         // Park wiper at safe in-range value (some ECUs read on wake)
@@ -190,18 +312,21 @@ void controlHeater(float cabin_temp, int target_temp) {
 
       case HS_LOW:
         digitalWrite(HEATER_CONTROL_PIN, HIGH);
+        heater_enabled = true;  // Update display variable
         lastOnMs = now;
         Serial.println("Heater: LOW");
         break;
 
       case HS_MED:
         digitalWrite(HEATER_CONTROL_PIN, HIGH);
+        heater_enabled = true;  // Update display variable
         lastOnMs = now;
         Serial.println("Heater: MEDIUM");
         break;
 
       case HS_HIGH:
         digitalWrite(HEATER_CONTROL_PIN, HIGH);
+        heater_enabled = true;  // Update display variable
         lastOnMs = now;
         Serial.println("Heater: HIGH");
         break;
@@ -231,8 +356,8 @@ void loop() {
       prev_temperature = target_temperature;
     }
 
-    // Get current time from RTC
-    DateTime now = rtc.now();
+    // Get stable time with validation and anti-jump protection
+    DateTime now = getStableTime();
     
     sensors.requestTemperatures();
     float tempC = sensors.getTempCByIndex(0);
@@ -243,6 +368,19 @@ void loop() {
 
     // Control the D1LC heater based on temperature difference
     controlHeater(tempC, target_temperature);
+    
+    // Debug output
+    Serial.print("Temp: "); Serial.print(tempC);
+    Serial.print(" Target: "); Serial.print(target_temperature);
+    Serial.print(" Heater: "); Serial.print(heater_enabled ? "ON" : "OFF");
+    Serial.print(" Level: ");
+    switch(hs) {
+      case HS_HIGH: Serial.print("HIGH"); break;
+      case HS_MED: Serial.print("MED"); break;
+      case HS_LOW: Serial.print("LOW"); break;
+      default: Serial.print("OFF"); break;
+    }
+    Serial.print(" Wiper: "); Serial.println(wiper_now);
 
     float tempDelta = tempC - target_temperature;
 
@@ -264,12 +402,16 @@ void loop() {
     char displayStrDelta[40];
     sprintf(displayStrDelta, "%sC", tempStrDelta);
 
-    // Format time for display
-    char timeStr[10];
-    sprintf(timeStr, "%02d:%02d", now.hour(), now.minute());
+    // Format time for display (with RTC status indicator)
+    char timeStr[12];
+    if (rtc_working) {
+      sprintf(timeStr, "%02d:%02d", now.hour(), now.minute());
+    } else {
+      sprintf(timeStr, "%02d:%02d?", now.hour(), now.minute());  // ? indicates RTC issue
+    }
     
     // Format date for display  
-    char dateStr[12];
+    char dateStr[15];
     sprintf(dateStr, "%02d/%02d/%04d", now.day(), now.month(), now.year());
 
     //u8g2.clearBuffer();
@@ -281,27 +423,70 @@ void loop() {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tr);
 
-    // Display time at top
-    u8g2.drawStr(1, 10, timeStr);
+    // Time with clock icon
+    u8g2.drawXBMP(1, 1, 16, 16, icon_clock);
+    u8g2.drawStr(20, 12, timeStr);
     
-    // Temperature readings
-    u8g2.drawStr(1, 22, "Current:");
-    u8g2.drawStr(50, 22, displayStr);
+    // Temperature with thermometer icon
+    u8g2.drawXBMP(1, 18, 16, 16, icon_temp);
+    u8g2.drawStr(20, 29, displayStr);
+    u8g2.drawStr(70, 29, displayStrTarget);
 
-    u8g2.drawStr(1, 34, "Desired:");
-    u8g2.drawStr(50, 34, displayStrTarget);
+    // Heater status with DYNAMIC ICONS and delay info
+    u8g2.drawStr(20, 41, "Heat:");
+    
+    // Draw dynamic heater icon and status
+    const unsigned char* heater_icon;
+    switch(hs) {
+      case HS_HIGH:
+        heater_icon = icon_heater_high;
+        u8g2.drawStr(50, 41, "HIGH");
+        break;
+      case HS_MED:
+        heater_icon = icon_heater_med;
+        u8g2.drawStr(50, 41, "MED");
+        break;
+      case HS_LOW:
+        heater_icon = icon_heater_low;
+        u8g2.drawStr(50, 41, "LOW");
+        break;
+      default:
+        heater_icon = icon_heater_off;
+        // Show delay countdown if waiting to turn on
+        float temp_diff_display = target_temperature - tempC;
+        
+        // Debug: print delay calculation
+        Serial.print("[DELAY DEBUG] temp_diff: "); Serial.print(temp_diff_display);
+        Serial.print(" HYS_ON: "); Serial.print(HYS_ON);
+        Serial.print(" canTurnOn: "); Serial.print(canTurnOn());
+        Serial.print(" lastOffMs: "); Serial.print(lastOffMs);
+        Serial.print(" millis: "); Serial.print(millis());
+        
+        if (temp_diff_display >= HYS_ON && !canTurnOn()) {
+          unsigned long time_left = MIN_OFF_MS - (millis() - lastOffMs);
+          char delayStr[10];
+          sprintf(delayStr, "%lum", time_left / (60UL * 1000UL));
+          u8g2.drawStr(50, 41, delayStr);  // Show minutes left
+          Serial.print(" DELAY: "); Serial.println(delayStr);
+        } else {
+          u8g2.drawStr(50, 41, "OFF");
+          Serial.println(" OFF");
+        }
+        break;
+    }
+    u8g2.drawXBMP(1, 35, 16, 16, heater_icon);
 
-    u8g2.drawStr(1, 46, "Delta:");
-    u8g2.drawStr(50, 46, displayStrDelta);
-
-    // Display date at bottom left
+    // Wiper debug info - smaller font
     u8g2.setFont(u8g2_font_5x7_tr);
-    u8g2.drawStr(1, 62, dateStr);
-
-    // Status icons
-    u8g2.drawXBMP(95, 48, 15, 16, image_network_3_bars_bits);
-    u8g2.drawXBMP(92, 1, 16, 16, image_weather_temperature_bits);
-    u8g2.drawXBMP(113, 48, 14, 16, image_bluetooth_bits);
+    char wiperStr[12];
+    sprintf(wiperStr, "W:%d", wiper_now);
+    u8g2.drawStr(85, 41, wiperStr);
+    
+    // Date and status at bottom
+    u8g2.drawStr(1, 58, dateStr);
+    if (!rtc_working) {
+      u8g2.drawStr(80, 58, "RTC?");
+    }
 
     u8g2.sendBuffer();
   }
