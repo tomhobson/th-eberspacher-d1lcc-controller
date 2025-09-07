@@ -9,6 +9,7 @@ Arduino-based temperature controller for Eberspacher D1LC heater with display an
 - **DS18B20 Temperature Sensor** (OneWire)
 - **Rotary Encoder** with push button
 - **DS3502 Digital Potentiometer** (I2C)
+- **DS3231 Real-Time Clock** with AT24C32 EEPROM (I2C)
 
 ## Pin Configuration
 
@@ -20,6 +21,7 @@ Arduino-based temperature controller for Eberspacher D1LC heater with display an
 | **Rotary Encoder** | Pin 5 | SW (Switch/Button) |
 | **OLED Display** | I2C | SDA/SCL (A4/A5 on Uno) |
 | **DS3502 Potentiometer** | I2C | SDA/SCL (A4/A5 on Uno) |
+| **DS3231 RTC Module** | I2C | SDA/SCL (A4/A5 on Uno) |
 
 ## Features
 
@@ -27,7 +29,9 @@ Arduino-based temperature controller for Eberspacher D1LC heater with display an
 - Target temperature adjustment via rotary encoder
 - Temperature delta calculation and display
 - Digital potentiometer control for heater output
+- Real-time clock with date/time display
 - OLED display with status icons (Bluetooth, WiFi, Temperature)
+- Automatic time setting on first boot or after power loss
 
 ## Dependencies
 
@@ -39,6 +43,7 @@ The following libraries are required:
 - `ezButton` - Button debouncing library
 - `Adafruit_DS3502` - Digital potentiometer control
 - `Adafruit_BusIO` - I2C/SPI bus abstraction
+- `RTClib` - DS3231 real-time clock library
 
 ## Build Instructions
 
@@ -58,7 +63,15 @@ This project is configured for CLion with CMake. The CMakeLists.txt file include
 
 ## Display Layout
 
+- **Time**: Current time (HH:MM) at top of display
 - **Current Temperature**: Real-time sensor reading
 - **Desired Temperature**: Target set via encoder
 - **Delta**: Difference between current and target
+- **Date**: Current date (DD/MM/YYYY) at bottom left
 - **Status Icons**: Network, Bluetooth, and Temperature indicators
+
+## I2C Device Addresses
+
+- **SSD1309 OLED Display**: 0x3C (default)
+- **DS3502 Digital Potentiometer**: 0x28 (default)
+- **DS3231 Real-Time Clock**: 0x68 (fixed)
